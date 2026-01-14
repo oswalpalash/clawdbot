@@ -45,24 +45,64 @@ function isLoopbackAddress(ip: string | undefined): boolean {
   return false;
 }
 
+function normalizeIp(ip: string): string {
+  if (ip.startsWith("::ffff:")) return ip.slice("::ffff:".length);
+  return ip;
+}
+
+function isTailscaleAddress(ip: string | undefined): boolean {
+  if (!ip) return false;
+  const normalized = normalizeIp(ip.trim().toLowerCase());
+  if (!normalized) return false;
+  if (normalized.includes(":")) {
+    // Tailscale IPv6 ULA prefix: fd7a:115c:a1e0::/48
+    return normalized.startsWith("fd7a:115c:a1e0:");
+  }
+
+  const parts = normalized.split(".");
+  if (parts.length !== 4) return false;
+  const octets = parts.map((part) => Number.parseInt(part, 10));
+  if (octets.some((n) => !Number.isFinite(n) || n < 0 || n > 255)) return false;
+
+  // Tailscale IPv4 range: 100.64.0.0/10
+  const [a, b] = octets;
+  return a === 100 && b >= 64 && b <= 127;
+}
+
+function getHostName(hostHeader: string): string {
+  const host = hostHeader.trim().toLowerCase();
+  if (!host) return "";
+  if (host.startsWith("[")) {
+    const end = host.indexOf("]");
+    if (end !== -1) return host.slice(1, end);
+  }
+  const [name] = host.split(":");
+  return name ?? "";
+}
+
 function isLocalDirectRequest(req?: IncomingMessage): boolean {
   if (!req) return false;
   const clientIp = req.socket?.remoteAddress ?? "";
-  if (!isLoopbackAddress(clientIp)) return false;
+  const clientIsLoopback = isLoopbackAddress(clientIp);
+  const clientIsTailscale = isTailscaleAddress(clientIp);
 
-  const host = (req.headers.host ?? "").toLowerCase();
+  const host = getHostName(req.headers?.host ?? "");
   const hostIsLocal =
-    host.startsWith("localhost") ||
-    host.startsWith("127.0.0.1") ||
-    host.startsWith("[::1]");
+    host === "localhost" || host === "127.0.0.1" || host === "::1";
+  const hostIsTailscale = host.endsWith(".ts.net") || isTailscaleAddress(host);
 
   const hasForwarded = Boolean(
-    req.headers["x-forwarded-for"] ||
-      req.headers["x-real-ip"] ||
-      req.headers["x-forwarded-host"],
+    req.headers?.["x-forwarded-for"] ||
+      req.headers?.["x-real-ip"] ||
+      req.headers?.["x-forwarded-host"],
   );
 
-  return hostIsLocal && !hasForwarded;
+  const isLocalHostMatch =
+    (clientIsLoopback && hostIsLocal) ||
+    (clientIsLoopback && hostIsTailscale) ||
+    (clientIsTailscale && hostIsTailscale);
+
+  return isLocalHostMatch && !hasForwarded;
 }
 
 function getTailscaleUser(req?: IncomingMessage): TailscaleUser | null {
